@@ -206,29 +206,35 @@ apiRouter.get('/health', (_req: Request, res: Response) => {
 });
 
 // Standard Model Context Protocol (MCP) Streamable HTTP & JSON-RPC endpoint: /api/mcp
-apiRouter.all('/mcp', async (req: Request, res: Response) => {
-  // Origin check
-  const origin = req.headers.origin;
-  const host = req.headers.host;
-  const forwardedHost = (req.headers['x-forwarded-host'] as string)?.split(',')[0]?.trim();
-  if (origin) {
-    try {
-      const originHost = new URL(origin).host;
-      if (originHost !== host && originHost !== forwardedHost) {
-        return res.status(403).json({
-          jsonrpc: '2.0',
-          error: { code: -32000, message: 'Forbidden origin' },
-          id: null
-        });
+export const mcpHandler = async (req: Request, res: Response) => {
+  // Origin check for state-changing POST requests
+  if (req.method === 'POST') {
+    const origin = req.headers.origin;
+    const host = req.headers.host;
+    const forwardedHost = (req.headers['x-forwarded-host'] as string)?.split(',')[0]?.trim();
+    if (origin) {
+      try {
+        const originHost = new URL(origin).host;
+        if (originHost !== host && originHost !== forwardedHost && !originHost.includes('vercel.app') && !originHost.includes('localhost')) {
+          return res.status(403).json({
+            jsonrpc: '2.0',
+            error: { code: -32000, message: 'Forbidden origin' },
+            id: null
+          });
+        }
+      } catch {
+        // ignore parsing error if local
       }
-    } catch {
-      // ignore parsing error if local
     }
   }
 
-  // GET: Server info and tool discovery
+  // GET: Server info, connection confirmation, and tool discovery
   if (req.method === 'GET') {
     return res.status(200).json({
+      status: 'connected',
+      message: 'API and MCP is connected and working',
+      api: 'connected and working',
+      mcp: 'connected and working',
       server: {
         name: 'plantrip-mcp-server',
         title: 'PlanTrip Travel Planner MCP',
@@ -339,7 +345,10 @@ apiRouter.all('/mcp', async (req: Request, res: Response) => {
     id,
     error: { code: -32601, message: `Method "${method}" not implemented` }
   });
-});
+};
+
+// Mount MCP handler on both /mcp and /api/mcp
+apiRouter.all(['/mcp', '/api/mcp'], mcpHandler);
 
 // Status check (Never exposes any API key or secret token)
 apiRouter.get('/status', (_req: Request, res: Response) => {
