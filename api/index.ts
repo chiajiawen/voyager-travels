@@ -190,6 +190,157 @@ Write a relaxing, warm, concise response (2-3 short paragraphs max).
 });
 
 
+// Health endpoint reporting MCP server info
+apiRouter.get('/health', (_req: Request, res: Response) => {
+  res.json({
+    status: 'ok',
+    mcpPath: '/api/mcp',
+    serverInfo: {
+      name: 'plantrip-mcp-server',
+      title: 'PlanTrip Travel Planner MCP',
+      version: '1.0.0'
+    },
+    toolsCount: MCP_TOOLS_METADATA.length,
+    uptime: process.uptime()
+  });
+});
+
+// Standard Model Context Protocol (MCP) Streamable HTTP & JSON-RPC endpoint: /api/mcp
+apiRouter.all('/mcp', async (req: Request, res: Response) => {
+  // Origin check
+  const origin = req.headers.origin;
+  const host = req.headers.host;
+  const forwardedHost = (req.headers['x-forwarded-host'] as string)?.split(',')[0]?.trim();
+  if (origin) {
+    try {
+      const originHost = new URL(origin).host;
+      if (originHost !== host && originHost !== forwardedHost) {
+        return res.status(403).json({
+          jsonrpc: '2.0',
+          error: { code: -32000, message: 'Forbidden origin' },
+          id: null
+        });
+      }
+    } catch {
+      // ignore parsing error if local
+    }
+  }
+
+  // GET: Server info and tool discovery
+  if (req.method === 'GET') {
+    return res.status(200).json({
+      server: {
+        name: 'plantrip-mcp-server',
+        title: 'PlanTrip Travel Planner MCP',
+        version: '1.0.0'
+      },
+      protocol: 'model-context-protocol/1.0',
+      supportedProtocols: ['2024-11-05', '2025-11-25'],
+      endpoints: {
+        mcp: '/api/mcp',
+        tools: '/api/mcp/tools',
+        call: '/api/mcp/call'
+      },
+      toolsCount: MCP_TOOLS_METADATA.length,
+      tools: MCP_TOOLS_METADATA.map(t => t.name),
+      instructions: 'Send standard MCP JSON-RPC 2.0 requests via POST (initialize, tools/list, tools/call).'
+    });
+  }
+
+  // Only POST is permitted for MCP protocol messaging
+  if (req.method !== 'POST') {
+    res.setHeader('Allow', 'POST, GET');
+    return res.status(405).json({
+      jsonrpc: '2.0',
+      error: { code: -32000, message: 'Method not allowed. Send MCP messages with POST.' },
+      id: null
+    });
+  }
+
+  const { jsonrpc = '2.0', id = null, method, params = {} } = req.body || {};
+
+  // Handshake initialization
+  if (method === 'initialize') {
+    return res.json({
+      jsonrpc: '2.0',
+      id,
+      result: {
+        protocolVersion: '2024-11-05',
+        capabilities: { tools: {} },
+        serverInfo: { name: 'plantrip-mcp-server', version: '1.0.0' }
+      }
+    });
+  }
+
+  // notifications/initialized: client confirms readiness
+  if (method === 'notifications/initialized') {
+    return res.status(202).end();
+  }
+
+  // Ping
+  if (method === 'ping') {
+    return res.json({
+      jsonrpc: '2.0',
+      id,
+      result: {}
+    });
+  }
+
+  // List tools
+  if (method === 'tools/list') {
+    return res.json({
+      jsonrpc: '2.0',
+      id,
+      result: {
+        tools: MCP_TOOLS_METADATA.map(t => ({
+          name: t.name,
+          description: t.description,
+          inputSchema: { type: 'object', properties: {} }
+        }))
+      }
+    });
+  }
+
+  // Execute tool
+  if (method === 'tools/call') {
+    const { name, arguments: toolArgs = {} } = params;
+    const handler = MCP_TOOLS_REGISTRY[name];
+    if (!handler) {
+      return res.status(404).json({
+        jsonrpc: '2.0',
+        id,
+        error: { code: -32601, message: `Tool "${name}" not found in MCP registry` }
+      });
+    }
+
+    try {
+      const output = await handler(toolArgs);
+      const isError = output && output.found === false;
+      return res.json({
+        jsonrpc: '2.0',
+        id,
+        result: {
+          isError: Boolean(isError),
+          content: [{ type: 'text', text: JSON.stringify(output, null, 2) }],
+          structuredContent: output
+        }
+      });
+    } catch (err: any) {
+      return res.status(500).json({
+        jsonrpc: '2.0',
+        id,
+        error: { code: -32603, message: err?.message || 'Internal tool execution error' }
+      });
+    }
+  }
+
+  return res.status(400).json({
+    jsonrpc: '2.0',
+    id,
+    error: { code: -32601, message: `Method "${method}" not implemented` }
+  });
+});
+
 // Status check (Never exposes any API key or secret token)
 apiRouter.get('/status', (_req: Request, res: Response) => {
   res.json({

@@ -14,10 +14,30 @@ async function startServer() {
   const port = process.env.PORT || 3000;
   const isProd = process.env.NODE_ENV === 'production';
 
+  app.use('/api', express.json({ limit: '1mb' }));
   app.use(express.json());
 
   // Mount API endpoints
   app.use('/api', apiRouter);
+
+  // Express error handler for /api returning JSON-RPC format instead of HTML
+  app.use('/api', (err: any, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (err instanceof SyntaxError && 'body' in err) {
+      return res.status(400).json({
+        jsonrpc: '2.0',
+        error: { code: -32700, message: 'Parse error: Invalid JSON was received by the server.' },
+        id: null
+      });
+    }
+    if (err) {
+      return res.status(400).json({
+        jsonrpc: '2.0',
+        error: { code: -32600, message: err.message || 'Invalid Request' },
+        id: null
+      });
+    }
+    next();
+  });
 
   if (!isProd) {
     const { createServer } = await import('vite');

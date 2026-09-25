@@ -1,3 +1,4 @@
+import { useSyncExternalStore } from 'react';
 import {
   Itinerary,
   PackingListResponse,
@@ -13,6 +14,103 @@ import {
 } from '../types/travel.ts';
 
 const LOCAL_STORAGE_TRIPS_KEY = 'plantrip_saved_trips_v1';
+
+// Custom MCP Not Found Error
+export class McpNotFoundError extends Error {
+  constructor(message: string, public dataset: string = 'demo') {
+    super(message);
+    this.name = 'McpNotFoundError';
+  }
+}
+
+export function describeMcpError(err: unknown): string {
+  if (err instanceof McpNotFoundError) {
+    return err.message;
+  }
+  if (err instanceof Error) {
+    return err.message;
+  }
+  return 'Unable to reach local MCP server.';
+}
+
+// Global MCP Status Store for useMcpStatus
+export interface McpStatusState {
+  status: 'online' | 'offline' | 'checking';
+  latencyMs: number | null;
+  protocolVersion: string;
+  lastActive: number;
+}
+
+let currentMcpState: McpStatusState = {
+  status: 'online',
+  latencyMs: null,
+  protocolVersion: '2024-11-05',
+  lastActive: Date.now()
+};
+
+const listeners = new Set<() => void>();
+
+function updateMcpStore(partial: Partial<McpStatusState>) {
+  currentMcpState = { ...currentMcpState, ...partial, lastActive: Date.now() };
+  listeners.forEach(cb => cb());
+}
+
+export function useMcpStatus(): McpStatusState {
+  return useSyncExternalStore(
+    (onStoreChange) => {
+      listeners.add(onStoreChange);
+      return () => listeners.delete(onStoreChange);
+    },
+    () => currentMcpState
+  );
+}
+
+/**
+ * Real MCP client call to /api/mcp or /api/mcp/call with real browser latency & 15s timeout
+ */
+export async function callMcp<T = any>(
+  tool: string,
+  args: Record<string, any> = {}
+): Promise<{ data: T; rawPayload: any; latency: number }> {
+  const startTime = performance.now();
+  try {
+    const res = await fetch('/api/mcp/call', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream'
+      },
+      body: JSON.stringify({ tool, arguments: args }),
+      signal: AbortSignal.timeout(15000)
+    });
+
+    const latency = Math.round(performance.now() - startTime);
+
+    if (!res.ok) {
+      updateMcpStore({ status: 'offline', latencyMs: null });
+      const errJson = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+      throw new Error(errJson.error || `MCP tool execution failed: HTTP ${res.status}`);
+    }
+
+    const payload = await res.json();
+    if (payload?.result?.found === false) {
+      updateMcpStore({ status: 'online', latencyMs: latency });
+      throw new McpNotFoundError(payload.result?.message || `No record found in demo dataset`);
+    }
+
+    updateMcpStore({ status: 'online', latencyMs: latency });
+    return {
+      data: payload.result as T,
+      rawPayload: payload,
+      latency
+    };
+  } catch (err: any) {
+    if (err.name === 'AbortError' || err.name === 'TimeoutError' || (err.message && err.message.includes('fetch'))) {
+      updateMcpStore({ status: 'offline', latencyMs: null });
+    }
+    throw err;
+  }
+}
 
 export class McpClientService {
   /**
@@ -69,17 +167,8 @@ export class McpClientService {
    * Execute raw MCP tool call by name
    */
   static async callTool<T = any>(tool: string, args: Record<string, any> = {}): Promise<T> {
-    const res = await fetch('/api/mcp/call', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ tool, arguments: args })
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
-      throw new Error(err.error || `Failed to execute ${tool}`);
-    }
-    const data = await res.json();
-    return data.result as T;
+    const { data } = await callMcp<T>(tool, args);
+    return data;
   }
 
   // ================= 14 SPECIALIZED TOOL WRAPPERS =================
