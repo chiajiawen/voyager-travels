@@ -190,18 +190,38 @@ Write a relaxing, warm, concise response (2-3 short paragraphs max).
 });
 
 
-// Health endpoint reporting MCP server info
-apiRouter.get('/health', (_req: Request, res: Response) => {
+// Health endpoint reporting live verified MCP server info
+apiRouter.get('/health', async (_req: Request, res: Response) => {
+  const toolsRegistered = Object.keys(MCP_TOOLS_REGISTRY);
+  let selfTestStatus = 'verified';
+  let latencyMs = 0;
+
+  try {
+    const t0 = performance.now();
+    await MCP_TOOLS_REGISTRY['get_weather_insights']({ destination: 'Kyoto, Japan' });
+    latencyMs = Math.round((performance.now() - t0) * 100) / 100;
+  } catch (err: any) {
+    selfTestStatus = `failed: ${err?.message || 'unknown'}`;
+  }
+
+  const isHealthy = toolsRegistered.length === 14 && selfTestStatus === 'verified';
+
   res.json({
-    status: 'ok',
+    status: isHealthy ? 'ok' : 'degraded',
+    verified: isHealthy,
+    api: isHealthy ? 'connected and working' : 'error',
+    mcp: isHealthy ? 'connected and working' : 'error',
     mcpPath: '/api/mcp',
     serverInfo: {
       name: 'plantrip-mcp-server',
       title: 'PlanTrip Travel Planner MCP',
       version: '1.0.0'
     },
-    toolsCount: MCP_TOOLS_METADATA.length,
-    uptime: process.uptime()
+    toolsCount: toolsRegistered.length,
+    selfTestStatus,
+    selfTestLatencyMs: latencyMs,
+    uptime: process.uptime(),
+    timestamp: new Date().toISOString()
   });
 });
 
@@ -228,13 +248,43 @@ export const mcpHandler = async (req: Request, res: Response) => {
     }
   }
 
-  // GET: Server info, connection confirmation, and tool discovery
+  // GET: Server info, dynamic live self-test verification, and tool discovery
   if (req.method === 'GET') {
+    const toolsRegistered = Object.keys(MCP_TOOLS_REGISTRY);
+    let selfTestResult = 'passed';
+    let testLatencyMs = 0;
+
+    // Dynamically test tool execution to verify the engine is truly active and working
+    try {
+      const testStart = performance.now();
+      const testCheck = await MCP_TOOLS_REGISTRY['get_weather_insights']({ destination: 'Kyoto, Japan' });
+      testLatencyMs = Math.round((performance.now() - testStart) * 100) / 100;
+      if (!testCheck || typeof testCheck !== 'object' || !('destination' in testCheck)) {
+        selfTestResult = 'invalid_output';
+      }
+    } catch (testErr: any) {
+      selfTestResult = `error: ${testErr?.message || 'execution failed'}`;
+    }
+
+    const isConnectedAndWorking = toolsRegistered.length > 0 && selfTestResult === 'passed';
+
     return res.status(200).json({
-      status: 'connected',
-      message: 'API and MCP is connected and working',
-      api: 'connected and working',
-      mcp: 'connected and working',
+      status: isConnectedAndWorking ? 'connected' : 'error',
+      verified: isConnectedAndWorking,
+      message: isConnectedAndWorking
+        ? 'API and MCP is connected and working'
+        : `MCP check failed: ${selfTestResult}`,
+      api: isConnectedAndWorking ? 'connected and working' : 'error',
+      mcp: isConnectedAndWorking ? 'connected and working' : 'error',
+      verification: {
+        timestamp: new Date().toISOString(),
+        selfTest: selfTestResult,
+        selfTestTool: 'get_weather_insights',
+        selfTestLatencyMs: testLatencyMs,
+        toolsRegisteredCount: toolsRegistered.length,
+        uptimeSeconds: Math.round(process.uptime()),
+        memoryUsageMb: Math.round((process.memoryUsage().heapUsed / 1024 / 1024) * 100) / 100
+      },
       server: {
         name: 'plantrip-mcp-server',
         title: 'PlanTrip Travel Planner MCP',
@@ -247,7 +297,7 @@ export const mcpHandler = async (req: Request, res: Response) => {
         tools: '/api/mcp/tools',
         call: '/api/mcp/call'
       },
-      toolsCount: MCP_TOOLS_METADATA.length,
+      toolsCount: toolsRegistered.length,
       tools: MCP_TOOLS_METADATA.map(t => t.name),
       instructions: 'Send standard MCP JSON-RPC 2.0 requests via POST (initialize, tools/list, tools/call).'
     });
